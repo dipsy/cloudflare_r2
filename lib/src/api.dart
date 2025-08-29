@@ -25,7 +25,8 @@ class CloudFlareR2 {
   static int? get statusCode => _statusCode;
 
   // Set up S3 values
-  static AWSCredentialScope? _scope;
+  // Region is stored and a fresh AWSCredentialScope will be created per request
+  static String _region = 'us-east-1';
   static final S3ServiceConfiguration _serviceConfiguration =
       S3ServiceConfiguration();
 
@@ -40,23 +41,28 @@ class CloudFlareR2 {
   ///[region] - the region of the bucket
   ///
   //MARK: init
-  static init(
-      {required String accoundId,
-      required String accessKeyId,
-      required String secretAccessKey,
-      String region = 'us-east-1'}) {
-    _host = '$accoundId.r2.cloudflarestorage.com';
+  static init({
+    // Support both accountId (correct) and accoundId (legacy typo) for compatibility
+    String? accountId,
+    String? accoundId,
+    required String accessKeyId,
+    required String secretAccessKey,
+    String region = 'us-east-1',
+  }) {
+    final id = accountId ?? accoundId;
+    if (id == null || id.isEmpty) {
+      throw ArgumentError(
+          'accountId is required (legacy: accoundId). Received null/empty.');
+    }
+    _host = '$id.r2.cloudflarestorage.com';
     _accessKeyId = accessKeyId;
     _secretAccessKey = secretAccessKey;
+    _region = region;
     // Create a signer which uses the `default` profile from the shared
     // credentials file.
     _signer = AWSSigV4Signer(
       credentialsProvider: AWSCredentialsProvider(
           AWSCredentials(_accessKeyId!, _secretAccessKey!)),
-    );
-    _scope = AWSCredentialScope(
-      region: region,
-      service: AWSService.s3,
     );
     _statusCode = null;
   }
@@ -101,7 +107,10 @@ class CloudFlareR2 {
     );
     final signedUrl = await _signer!.sign(
       urlRequest,
-      credentialScope: _scope!,
+      credentialScope: AWSCredentialScope(
+        region: _region,
+        service: AWSService.s3,
+      ),
       serviceConfiguration: _serviceConfiguration,
     );
 
@@ -201,7 +210,10 @@ class CloudFlareR2 {
 
     final signedRequest = await _signer!.sign(
       urlRequest,
-      credentialScope: _scope!,
+      credentialScope: AWSCredentialScope(
+        region: _region,
+        service: AWSService.s3,
+      ),
       serviceConfiguration: _serviceConfiguration,
     );
 
@@ -283,7 +295,10 @@ class CloudFlareR2 {
     );
     final signedUrl = await _signer!.sign(
       urlRequest,
-      credentialScope: _scope!,
+      credentialScope: AWSCredentialScope(
+        region: _region,
+        service: AWSService.s3,
+      ),
       serviceConfiguration: _serviceConfiguration,
     );
 
@@ -341,7 +356,10 @@ class CloudFlareR2 {
     );
     final signedUrl = await _signer!.sign(
       urlRequest,
-      credentialScope: _scope!,
+      credentialScope: AWSCredentialScope(
+        region: _region,
+        service: AWSService.s3,
+      ),
       serviceConfiguration: _serviceConfiguration,
       // expiresIn: const Duration(minutes: 1),
     );
@@ -408,7 +426,10 @@ class CloudFlareR2 {
     );
     final signedUrl = await _signer!.sign(
       urlRequest,
-      credentialScope: _scope!,
+      credentialScope: AWSCredentialScope(
+        region: _region,
+        service: AWSService.s3,
+      ),
       serviceConfiguration: _serviceConfiguration,
     );
 
@@ -478,7 +499,10 @@ class CloudFlareR2 {
 
     final signedUrl = await _signer!.presign(
       urlRequest,
-      credentialScope: _scope!,
+      credentialScope: AWSCredentialScope(
+        region: _region,
+        service: AWSService.s3,
+      ),
       serviceConfiguration: _serviceConfiguration,
       expiresIn: expiresIn,
     );
@@ -534,7 +558,10 @@ class CloudFlareR2 {
 
     final signedUrl = await _signer!.presign(
       urlRequest,
-      credentialScope: _scope!,
+      credentialScope: AWSCredentialScope(
+        region: _region,
+        service: AWSService.s3,
+      ),
       serviceConfiguration: _serviceConfiguration,
       expiresIn: expiresIn,
     );
@@ -599,7 +626,10 @@ class CloudFlareR2 {
     );
     final signedUrl = await _signer!.sign(
       urlRequest,
-      credentialScope: _scope!,
+      credentialScope: AWSCredentialScope(
+        region: _region,
+        service: AWSService.s3,
+      ),
       serviceConfiguration: _serviceConfiguration,
     );
 
