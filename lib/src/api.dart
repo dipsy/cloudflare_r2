@@ -281,15 +281,14 @@ class CloudFlareR2 {
     assert(_signer != null,
         'Please call CloudFlareR2.init() before using this library');
     _statusCode = null;
-    // Create a pre-signed URL for downloading the file
+
+    // Create a pre-signed URL for uploading the file
     final urlRequest = AWSHttpRequest.put(
       Uri.https(_host, '$bucket/$objectName'),
       headers: {
         AWSHeaders.host: _host,
         if (contentType != null) AWSHeaders.contentType: contentType,
-        // AWSHeaders.contentType: contentType ?? 'application/octet-stream',
         AWSHeaders.contentLength: objectBytes.length.toString(),
-        // if (contentType != null && contentType.isNotEmpty) AWSHeaders.contentType: contentType,
       },
       body: objectBytes,
     );
@@ -304,6 +303,7 @@ class CloudFlareR2 {
 
     final response = await signedUrl.send().response;
     _statusCode = response.statusCode;
+
     if (statusCode != 200) {
       //https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html
       //https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html#API_PutObject_Errors
