@@ -1,5 +1,3 @@
-//check for https://github.com/aws-amplify/amplify-flutter/blob/main/packages/aws_signature_v4/example/bin/example.dart
-
 import 'dart:convert';
 
 import 'package:aws_common/aws_common.dart';
@@ -10,107 +8,87 @@ import 'package:xml/xml.dart';
 
 import 'model/object_info.dart';
 
-class CloudFlareR2 {
-  CloudFlareR2._();
-  static final CloudFlareR2 _instance = CloudFlareR2._();
-  factory CloudFlareR2() => _instance;
-
-  static String _host = '<accoundId>.r2.cloudflarestorage.com';
-  static AWSSigV4Signer? _signer;
-  static String? _accessKeyId;
-  static String? _secretAccessKey;
-  static int? _statusCode;
-
-  ///return the last status code from the last request
-  static int? get statusCode => _statusCode;
-
-  // Set up S3 values
-  // Region is stored and a fresh AWSCredentialScope will be created per request
-  static String _region = 'us-east-1';
-  static final S3ServiceConfiguration _serviceConfiguration =
+/// S3-compatible storage client.
+///
+/// Supports Cloudflare R2, Wasabi, AWS S3, and other S3-compatible providers.
+/// Each instance holds its own endpoint, region, and credentials, allowing
+/// multiple concurrent connections to different regions/providers.
+class S3Client {
+  final String host;
+  final String region;
+  final AWSSigV4Signer _signer;
+  final S3ServiceConfiguration _serviceConfiguration =
       S3ServiceConfiguration();
 
-  ///initialize the CloudFlareR2
+  /// Last HTTP status code from the most recent request on this instance.
+  int? lastStatusCode;
+
+  /// Create an S3Client for a specific endpoint.
   ///
-  ///[accoundId] - the account id
-  ///
-  ///[accessKeyId] - the access key id
-  ///
-  ///[secretAccessKey] - the secret access key
-  ///
-  ///[region] - the region of the bucket
-  ///
-  //MARK: init
-  static init({
-    // Support both accountId (correct) and accoundId (legacy typo) for compatibility
-    String? accountId,
-    String? accoundId,
+  /// [host] - S3-compatible endpoint (e.g. 's3.eu-central-1.wasabisys.com'
+  ///   or '<accountId>.r2.cloudflarestorage.com')
+  /// [region] - signing region (e.g. 'eu-central-1', 'auto' for R2)
+  /// [accessKeyId] - S3 access key
+  /// [secretAccessKey] - S3 secret key
+  S3Client({
+    required this.host,
     required String accessKeyId,
     required String secretAccessKey,
-    String region = 'us-east-1',
+    this.region = 'us-east-1',
+  }) : _signer = AWSSigV4Signer(
+          credentialsProvider: AWSCredentialsProvider(
+            AWSCredentials(accessKeyId, secretAccessKey),
+          ),
+        );
+
+  /// Create from Cloudflare R2 account ID.
+  factory S3Client.r2({
+    required String accountId,
+    required String accessKeyId,
+    required String secretAccessKey,
+    String region = 'auto',
   }) {
-    final id = accountId ?? accoundId;
-    if (id == null || id.isEmpty) {
-      throw ArgumentError(
-          'accountId is required (legacy: accoundId). Received null/empty.');
-    }
-    _host = '$id.r2.cloudflarestorage.com';
-    _accessKeyId = accessKeyId;
-    _secretAccessKey = secretAccessKey;
-    _region = region;
-    // Create a signer which uses the `default` profile from the shared
-    // credentials file.
-    _signer = AWSSigV4Signer(
-      credentialsProvider: AWSCredentialsProvider(
-          AWSCredentials(_accessKeyId!, _secretAccessKey!)),
+    return S3Client(
+      host: '$accountId.r2.cloudflarestorage.com',
+      accessKeyId: accessKeyId,
+      secretAccessKey: secretAccessKey,
+      region: region,
     );
-    _statusCode = null;
   }
 
-  ///get the Object from R2
-  ///
-  ///[bucket] - the bucket name
-  ///
-  ///[objectName] - the object name
-  ///
-  ///[region] - the region of the bucket
-  ///
-  ///onReceiveProgress
-  ///
-  ///[received] - the received bytes
-  ///
-  ///[total] - the total bytes
-  ///
-  ///```dart
-  ///onReceiveProgress: (received, total) {
-  ///   if (total != -1) {
-  ///     print((received / total * 100).toStringAsFixed(0) + '%');
-  ///   }
-  /// }
-  /// ```
-  //MARK: getObject
-  static Future<List<int>> getObject({
+  /// Create from Wasabi region.
+  factory S3Client.wasabi({
+    required String region,
+    required String accessKeyId,
+    required String secretAccessKey,
+  }) {
+    return S3Client(
+      host: 's3.$region.wasabisys.com',
+      accessKeyId: accessKeyId,
+      secretAccessKey: secretAccessKey,
+      region: region,
+    );
+  }
+
+  AWSCredentialScope get _credentialScope => AWSCredentialScope(
+        region: region,
+        service: AWSService.s3,
+      );
+
+  Future<List<int>> getObject({
     required String bucket,
     required String objectName,
-    String region = 'us-east-1',
     void Function(int received, int total)? onReceiveProgress,
   }) async {
-    assert(_signer != null,
-        'Please call CloudFlareR2.init() before using this library');
-    _statusCode = null;
-    // Create a pre-signed URL for downloading the file
+    lastStatusCode = null;
+
     final urlRequest = AWSHttpRequest.get(
-      Uri.https(_host, '$bucket/$objectName'),
-      headers: {
-        AWSHeaders.host: _host,
-      },
+      Uri.https(host, '$bucket/$objectName'),
+      headers: {AWSHeaders.host: host},
     );
-    final signedUrl = await _signer!.sign(
+    final signedUrl = await _signer.sign(
       urlRequest,
-      credentialScope: AWSCredentialScope(
-        region: _region,
-        service: AWSService.s3,
-      ),
+      credentialScope: _credentialScope,
       serviceConfiguration: _serviceConfiguration,
     );
 
@@ -130,111 +108,59 @@ class CloudFlareR2 {
     var response = await send.response;
     expectedTotalBytes =
         int.tryParse(response.headers['content-length'] ?? '') ?? -1;
-    _statusCode = response.statusCode;
+    lastStatusCode = response.statusCode;
 
-    if (statusCode != 200) {
-      //https://awscli.amazonaws.com/v2/documentation/api/2.9.6/reference/s3api/get-object.html
-      if (statusCode == 404) {
-        throw Exception('File not found');
-      }
-      if (statusCode == 403) {
-        throw Exception('Access Denied');
-      }
+    if (lastStatusCode != 200) {
+      if (lastStatusCode == 404) throw Exception('File not found');
+      if (lastStatusCode == 403) throw Exception('Access Denied');
       throw Exception('Failed to download file');
     }
 
     var data = await response.bodyBytes;
-    //call onReceiveProgress with the total bytes to indicate that the download is complete
-    //for some reason the listen event is called after the download is complete
-    //this may result in the progress callback be called after the download is complete
     onReceiveProgress?.call(expectedTotalBytes, expectedTotalBytes);
-    //set the expectedTotalBytes to -1 to indicate that the download is complete
     expectedTotalBytes = -1;
 
     return data;
   }
 
-  ///get File SIZE from R2
-  ///
-  ///return the size of the object in `bytes`
-  ///
-  ///To get the size of the object in `MB` use the following code
-  ///```dart
-  ///var size = await CloudFlareR2.getObjectSize('your bucket', 'your object name');
-  ///mbSize = size / 1024 / 1024;
-  ///print('Size in bytes: $size');
-  ///print('Size in MB: ${mbSize.toStringAsFixed(2)} MB');
-  ///```
-  ///
-  ///*code from [@jesussmile](https://github.com/rodolfogoulart/cloudflare_r2/issues/4)*
-  //MARK: getObjectSize
-  static Future<int> getObjectSize({
+  Future<int> getObjectSize({
     required String bucket,
     required String objectName,
-    String region = 'us-east-1',
   }) async {
-    return (await getObjectInfo(
-            bucket: bucket, objectName: objectName, region: region))
-        .size;
+    return (await getObjectInfo(bucket: bucket, objectName: objectName)).size;
   }
 
-  ///get the Object Info from R2
-  ///
-  ///[bucket] - the bucket name
-  ///
-  ///[objectName] - the object name
-  ///
-  ///[region] - the region of the bucket
-  ///
-  ///return [ObjectInfo] - the object info
-  ///  * [storageClass] not available
-  ///
-  /// check https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html
-  //MARK: getObjectInfo
-  static Future<ObjectInfo> getObjectInfo({
+  Future<ObjectInfo> getObjectInfo({
     required String bucket,
     required String objectName,
-    String region = 'us-east-1',
   }) async {
-    assert(_signer != null,
-        'Please call CloudFlareR2.init() before using this library');
-    _statusCode = null;
+    lastStatusCode = null;
 
     final urlRequest = AWSHttpRequest.head(
-      Uri.https(_host, '$bucket/$objectName'),
+      Uri.https(host, '$bucket/$objectName'),
       headers: {
-        AWSHeaders.host: _host,
+        AWSHeaders.host: host,
         'Accept-Encoding': 'identity',
       },
     );
 
-    final signedRequest = await _signer!.sign(
+    final signedRequest = await _signer.sign(
       urlRequest,
-      credentialScope: AWSCredentialScope(
-        region: _region,
-        service: AWSService.s3,
-      ),
+      credentialScope: _credentialScope,
       serviceConfiguration: _serviceConfiguration,
     );
 
     final response = await signedRequest.send().response;
-    _statusCode = response.statusCode;
-    if (statusCode != 200) {
-      //https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html
-      if (statusCode == 404) {
-        throw Exception('File not found');
-      }
-      if (statusCode == 403) {
-        throw Exception('Access Denied');
-      }
-      throw Exception('Failed to get object info: $statusCode');
+    lastStatusCode = response.statusCode;
+    if (lastStatusCode != 200) {
+      if (lastStatusCode == 404) throw Exception('File not found');
+      if (lastStatusCode == 403) throw Exception('Access Denied');
+      throw Exception('Failed to get object info: $lastStatusCode');
     }
 
     final contentLength =
         int.tryParse(response.headers['content-length'] ?? '');
     final etag = response.headers['etag'];
-    //use intl to not use dart io
-    // final lastmodified = HttpDate.parse(response.headers['last-modified'] ?? '');
     final lastModifiedHeader = response.headers['last-modified'];
     final DateFormat httpDateFormat =
         DateFormat('EEE, dd MMM yyyy HH:mm:ss \'GMT\'', 'en_US');
@@ -242,267 +168,161 @@ class CloudFlareR2 {
         ? httpDateFormat.parseUtc(lastModifiedHeader)
         : null;
 
-    if (contentLength == null) {
-      throw Exception('Content-Length header missing');
-    }
-    if (etag == null) {
-      throw Exception('ETag header missing');
-    }
-    if (lastModified == null) {
-      throw Exception('Last-Modified header missing');
-    }
-
-    var objectInfo = ObjectInfo(
-      key: objectName,
-      size: contentLength,
-      lastModified: lastModified,
-      eTag: etag,
-    );
+    if (contentLength == null) throw Exception('Content-Length header missing');
+    if (etag == null) throw Exception('ETag header missing');
+    if (lastModified == null) throw Exception('Last-Modified header missing');
 
     if (contentLength <= 0) {
       throw Exception('Invalid file size: $contentLength bytes');
     }
 
-    return objectInfo;
+    return ObjectInfo(
+      key: objectName,
+      size: contentLength,
+      lastModified: lastModified,
+      eTag: etag,
+    );
   }
 
-  ///put the Object to R2
-  ///
-  ///check https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html
-  ///
-  //MARK: putObject
-  static Future<Status> putObject({
+  Future<Status> putObject({
     required String bucket,
     required String objectName,
     required List<int> objectBytes,
-    String region = 'us-east-1',
     String? contentType,
   }) async {
-    assert(_signer != null,
-        'Please call CloudFlareR2.init() before using this library');
-    _statusCode = null;
+    lastStatusCode = null;
 
-    // Create a pre-signed URL for uploading the file
     final urlRequest = AWSHttpRequest.put(
-      Uri.https(_host, '$bucket/$objectName'),
+      Uri.https(host, '$bucket/$objectName'),
       headers: {
-        AWSHeaders.host: _host,
+        AWSHeaders.host: host,
         if (contentType != null) AWSHeaders.contentType: contentType,
         AWSHeaders.contentLength: objectBytes.length.toString(),
       },
       body: objectBytes,
     );
-    final signedUrl = await _signer!.sign(
+    final signedUrl = await _signer.sign(
       urlRequest,
-      credentialScope: AWSCredentialScope(
-        region: _region,
-        service: AWSService.s3,
-      ),
+      credentialScope: _credentialScope,
       serviceConfiguration: _serviceConfiguration,
     );
 
     final response = await signedUrl.send().response;
-    _statusCode = response.statusCode;
+    lastStatusCode = response.statusCode;
 
-    if (statusCode != 200) {
-      //https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html
-      //https://docs.aws.amazon.com/AmazonS3/latest/API/API_PutObject.html#API_PutObject_Errors
-      if (statusCode == 403) {
-        throw Exception('Access Denied');
-      }
-      if (statusCode == 400) {
-        throw Exception('Bad Request');
-      }
-      if (statusCode == 409) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#status.409
-        throw Exception('Conflict');
-      }
-      if (statusCode == 415) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#status.415
-        throw Exception('Unsupported Media Type');
-      }
-      throw Exception('Failed to upload file. Status Code: $statusCode');
-    } else {
-      ///https://www.rfc-editor.org/rfc/rfc9110.html#name-put
-      String message = '';
-      if (statusCode == 200) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#name-200-ok
-        message = 'File uploaded successfully';
-      } else if (statusCode == 201) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#name-201-created
-        message = 'File created successfully';
-      }
-      return Status(
-        status: statusCode,
-        message: message,
-      );
+    if (lastStatusCode != 200) {
+      if (lastStatusCode == 403) throw Exception('Access Denied');
+      if (lastStatusCode == 400) throw Exception('Bad Request');
+      if (lastStatusCode == 409) throw Exception('Conflict');
+      if (lastStatusCode == 415) throw Exception('Unsupported Media Type');
+      throw Exception('Failed to upload file. Status Code: $lastStatusCode');
     }
+
+    return Status(
+      status: lastStatusCode,
+      message: lastStatusCode == 200
+          ? 'File uploaded successfully'
+          : 'File created successfully',
+    );
   }
 
-  ///delete the Object from R2
-  //MARK: deleteObjects
-  static Future<Status> deleteObject(
-      {required String bucket, required String objectName}) async {
-    assert(_signer != null,
-        'Please call CloudFlareR2.init() before using this library');
-    _statusCode = null;
-    // Create a pre-signed URL for downloading the file
+  Future<Status> deleteObject({
+    required String bucket,
+    required String objectName,
+  }) async {
+    lastStatusCode = null;
+
     final urlRequest = AWSHttpRequest.delete(
-      Uri.https(_host, '$bucket/$objectName'),
+      Uri.https(host, '$bucket/$objectName'),
       headers: {
-        AWSHeaders.host: _host,
+        AWSHeaders.host: host,
         AWSHeaders.accept: '*/*',
       },
     );
-    final signedUrl = await _signer!.sign(
+    final signedUrl = await _signer.sign(
       urlRequest,
-      credentialScope: AWSCredentialScope(
-        region: _region,
-        service: AWSService.s3,
-      ),
+      credentialScope: _credentialScope,
       serviceConfiguration: _serviceConfiguration,
-      // expiresIn: const Duration(minutes: 1),
     );
 
     final response = await signedUrl.send().response;
-    _statusCode = response.statusCode;
+    lastStatusCode = response.statusCode;
 
-    // log('Upload File Response: $uploadStatus');
-    if (![200, 202, 204].contains(statusCode)) {
-      var status =
-          'AWS Status Code: $statusCode\n Check https://www.rfc-editor.org/rfc/rfc9110.html#name-delete';
-      if (statusCode == 400) {
-        throw Exception('Bad Request. $status');
-      }
-      if (statusCode == 403) {
-        throw Exception('Access Denied. $status');
-      }
+    if (![200, 202, 204].contains(lastStatusCode)) {
+      if (lastStatusCode == 400) throw Exception('Bad Request');
+      if (lastStatusCode == 403) throw Exception('Access Denied');
       throw Exception(
-          'Failed to delete file. AWS Status Code: $statusCode\n Check https://www.rfc-editor.org/rfc/rfc9110.html#name-delete');
-    } else {
-      String message = '';
-      if (statusCode == 200) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#name-200-ok
-        message = 'File deleted successfully';
-      } else if (statusCode == 204) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#name-204-no-content
-        message = 'No content, file deleted successfully';
-      } else if (statusCode == 202) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#status.202
-        message = 'Request accepted, file will be deleted soon';
-      }
-      return Status(
-        status: statusCode,
-        message: message,
-      );
+          'Failed to delete file. Status Code: $lastStatusCode');
     }
+
+    String message = switch (lastStatusCode) {
+      200 => 'File deleted successfully',
+      204 => 'No content, file deleted successfully',
+      202 => 'Request accepted, file will be deleted soon',
+      _ => '',
+    };
+    return Status(status: lastStatusCode, message: message);
   }
 
-  ///delete List of Objects from R2
-  ///
-  ///[bucket] - the bucket name
-  ///
-  ///[objectNames] - the list of object names
-  ///
-  ///check https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html
-  //MARK: deleteObjects
-  static Future<Status> deleteObjects(
-      {required String bucket, required List<String> objectNames}) async {
-    assert(_signer != null,
-        'Please call CloudFlareR2.init() before using this library');
-    _statusCode = null;
-    // Create XML body for the delete request
+  Future<Status> deleteObjects({
+    required String bucket,
+    required List<String> objectNames,
+  }) async {
+    lastStatusCode = null;
+
     final xmlBody =
         '<Delete>${objectNames.map((name) => '<Object><Key>$name</Key></Object>').join()}</Delete>';
-    // Create a pre-signed URL for downloading the file
     final urlRequest = AWSHttpRequest.post(
-      Uri.https(_host, bucket, {'delete': ''}),
+      Uri.https(host, bucket, {'delete': ''}),
       headers: {
-        AWSHeaders.host: _host,
+        AWSHeaders.host: host,
         AWSHeaders.accept: '*/*',
         AWSHeaders.contentType: 'application/xml',
       },
       body: utf8.encode(xmlBody),
     );
-    final signedUrl = await _signer!.sign(
+    final signedUrl = await _signer.sign(
       urlRequest,
-      credentialScope: AWSCredentialScope(
-        region: _region,
-        service: AWSService.s3,
-      ),
+      credentialScope: _credentialScope,
       serviceConfiguration: _serviceConfiguration,
     );
 
     final response = await signedUrl.send().response;
-    _statusCode = response.statusCode;
-    // log('Upload File Response: $uploadStatus');
-    if (![200, 202, 204].contains(statusCode)) {
-      var status =
-          'AWS Status Code: $statusCode\n Check https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html';
-      if (statusCode == 400) {
-        throw Exception('Bad Request. $status');
-      }
-      if (statusCode == 403) {
-        throw Exception('Access Denied. $status');
-      }
-      throw Exception('Failed to delete files. $status');
-    } else {
-      String message = '';
-      if (statusCode == 200) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#name-200-ok
-        message = 'Files deleted successfully';
-      } else if (statusCode == 204) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#name-204-no-content
-        message = 'No content, file deleted successfully';
-      } else if (statusCode == 202) {
-        //https://www.rfc-editor.org/rfc/rfc9110.html#status.202
-        message = 'Request accepted, file will be deleted soon';
-      }
-      return Status(
-        status: statusCode,
-        message: message,
-      );
+    lastStatusCode = response.statusCode;
+
+    if (![200, 202, 204].contains(lastStatusCode)) {
+      if (lastStatusCode == 400) throw Exception('Bad Request');
+      if (lastStatusCode == 403) throw Exception('Access Denied');
+      throw Exception('Failed to delete files. Status Code: $lastStatusCode');
     }
+
+    String message = switch (lastStatusCode) {
+      200 => 'Files deleted successfully',
+      204 => 'No content, file deleted successfully',
+      202 => 'Request accepted, file will be deleted soon',
+      _ => '',
+    };
+    return Status(status: lastStatusCode, message: message);
   }
 
-  ///Generate a pre-signed URL for downloading an object
-  ///
-  ///[bucket] - the bucket name
-  ///
-  ///[objectName] - the object name
-  ///
-  ///[expiresIn] - the duration for which the URL is valid (default: 1 hour)
-  ///
-  ///[queryParameters] - additional query parameters to include in the URL
-  ///
-  ///[headers] - additional headers to include in the signed request
-  ///
-  ///Returns a pre-signed URL as a String that can be used to download the object
-  //MARK: getPresignedUrl
-  static Future<String> getPresignedUrl({
+  Future<String> getPresignedUrl({
     required String bucket,
     required String objectName,
     Duration expiresIn = const Duration(hours: 1),
     Map<String, String>? queryParameters,
     Map<String, String>? headers,
   }) async {
-    assert(_signer != null,
-        'Please call CloudFlareR2.init() before using this library');
-
     final urlRequest = AWSHttpRequest.get(
-      Uri.https(_host, '$bucket/$objectName', queryParameters),
+      Uri.https(host, '$bucket/$objectName', queryParameters),
       headers: {
-        AWSHeaders.host: _host,
+        AWSHeaders.host: host,
         ...?headers,
       },
     );
 
-    final signedUrl = await _signer!.presign(
+    final signedUrl = await _signer.presign(
       urlRequest,
-      credentialScope: AWSCredentialScope(
-        region: _region,
-        service: AWSService.s3,
-      ),
+      credentialScope: _credentialScope,
       serviceConfiguration: _serviceConfiguration,
       expiresIn: expiresIn,
     );
@@ -510,58 +330,29 @@ class CloudFlareR2 {
     return signedUrl.toString();
   }
 
-  ///Generate a pre-signed URL for uploading an object
-  ///
-  ///[bucket] - the bucket name
-  ///
-  ///[objectName] - the object name
-  ///
-  ///[expiresIn] - the duration for which the URL is valid (default: 1 hour, max: 7 days)
-  ///
-  ///[contentType] - the content type of the object to be uploaded
-  ///
-  ///[headers] - additional headers to include in the signed request
-  ///
-  ///Returns a pre-signed URL as a String that can be used to upload the object
-  ///
-  ///Security recommendations:
-  ///- Use short expiration times (5-30 minutes) for sensitive operations
-  ///- Always specify contentType to restrict file types
-  ///- Validate file sizes on the client side before upload
-  ///- Generate unique object names to prevent overwrites
-  //MARK: putPresignedUrl
-  static Future<String> putPresignedUrl({
+  Future<String> putPresignedUrl({
     required String bucket,
     required String objectName,
     Duration expiresIn = const Duration(hours: 1),
     String? contentType,
     Map<String, String>? headers,
   }) async {
-    assert(_signer != null,
-        'Please call CloudFlareR2.init() before using this library');
-
-    // Validate expiration time (max 7 days)
     if (expiresIn.inSeconds > 604800) {
       throw ArgumentError('expiresIn cannot exceed 7 days (604800 seconds)');
     }
 
-    final requestHeaders = {
-      AWSHeaders.host: _host,
-      if (contentType != null) AWSHeaders.contentType: contentType,
-      ...?headers,
-    };
-
     final urlRequest = AWSHttpRequest.put(
-      Uri.https(_host, '$bucket/$objectName'),
-      headers: requestHeaders,
+      Uri.https(host, '$bucket/$objectName'),
+      headers: {
+        AWSHeaders.host: host,
+        if (contentType != null) AWSHeaders.contentType: contentType,
+        ...?headers,
+      },
     );
 
-    final signedUrl = await _signer!.presign(
+    final signedUrl = await _signer.presign(
       urlRequest,
-      credentialScope: AWSCredentialScope(
-        region: _region,
-        service: AWSService.s3,
-      ),
+      credentialScope: _credentialScope,
       serviceConfiguration: _serviceConfiguration,
       expiresIn: expiresIn,
     );
@@ -569,45 +360,18 @@ class CloudFlareR2 {
     return signedUrl.toString();
   }
 
-  /// List objects in a bucket
-  ///
-  /// [bucket] - the bucket name
-  ///
-  /// [region] - the region of the bucket
-  ///
-  /// [doPagination] - whether to paginate through all objects in the bucket
-  ///
-  /// [maxKeys] - the maximum number of objects to return in a single response
-  ///
-  /// [delimiter] - a character you use to group keys
-  ///
-  /// [prefix] - limits the response to keys that begin with the specified prefix
-  ///
-  /// [encodingType] - specifies the encoding method used to encode the object keys in the response
-  ///
-  /// [startAfter] - specifies the key to start after when listing objects in a bucket
-  ///
-  /// [continuationToken] - the token to use for paginating through objects, **DO NOT** set this manually unless you know what you are doing
-  ///
-  /// Check https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
-  //MARK: listObjectsV2
-  static Future<List<ObjectInfo>> listObjectsV2({
+  Future<List<ObjectInfo>> listObjectsV2({
     required String bucket,
-    String region = 'us-east-1',
     bool doPagination = true,
-    int maxKeys = 1000, //default max keys
+    int maxKeys = 1000,
     String? delimiter,
     String? prefix,
     String? encodingType,
     String? startAfter,
-
-    ///used to paginate through objects, do not set this manually
     String? continuationToken,
   }) async {
-    assert(_signer != null,
-        'Please call CloudFlareR2.init() before using this library');
-    _statusCode = null;
-    // Create query parameters
+    lastStatusCode = null;
+
     final queryParams = {
       'list-type': '2',
       'max-keys': maxKeys.toString(),
@@ -617,35 +381,25 @@ class CloudFlareR2 {
       if (encodingType != null) 'encoding-type': encodingType,
       if (startAfter != null) 'start-after': startAfter,
     };
-    // Create a pre-signed URL for listing objects in the bucket
+
     final urlRequest = AWSHttpRequest.get(
-      Uri.https(_host, bucket, queryParams),
-      headers: {
-        AWSHeaders.host: _host,
-      },
+      Uri.https(host, bucket, queryParams),
+      headers: {AWSHeaders.host: host},
     );
-    final signedUrl = await _signer!.sign(
+    final signedUrl = await _signer.sign(
       urlRequest,
-      credentialScope: AWSCredentialScope(
-        region: _region,
-        service: AWSService.s3,
-      ),
+      credentialScope: _credentialScope,
       serviceConfiguration: _serviceConfiguration,
     );
 
     final response = await signedUrl.send().response;
-    _statusCode = response.statusCode;
-    if (statusCode != 200) {
-      if (statusCode == 404) {
-        throw Exception('Bucket not found');
-      }
-      if (statusCode == 403) {
-        throw Exception('Access Denied');
-      }
-      throw Exception('Failed to list objects: $statusCode');
+    lastStatusCode = response.statusCode;
+    if (lastStatusCode != 200) {
+      if (lastStatusCode == 404) throw Exception('Bucket not found');
+      if (lastStatusCode == 403) throw Exception('Access Denied');
+      throw Exception('Failed to list objects: $lastStatusCode');
     }
 
-    // Parse XML response
     final bodyBytes = await response.bodyBytes;
     final xml = String.fromCharCodes(bodyBytes);
     final document = XmlDocument.parse(xml);
@@ -655,7 +409,6 @@ class CloudFlareR2 {
         .singleOrNull
         ?.innerText;
 
-    // Extract object names
     final List<ObjectInfo> objectNames = [];
     for (var node in contents) {
       var key = node.findElements('Key').singleOrNull?.innerText;
@@ -684,10 +437,8 @@ class CloudFlareR2 {
     }
     if (doPagination == false) return objectNames;
     if (nextContinuationToken != null) {
-      // Recursive call to get more objects if continuation token is present
       final nextObjectNames = await listObjectsV2(
         bucket: bucket,
-        region: region,
         maxKeys: maxKeys,
         continuationToken: nextContinuationToken,
       );
@@ -697,3 +448,7 @@ class CloudFlareR2 {
     return objectNames;
   }
 }
+
+/// Legacy alias for backward compatibility.
+@Deprecated('Use S3Client instead')
+typedef CloudFlareR2 = S3Client;
