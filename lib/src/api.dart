@@ -41,7 +41,8 @@ class S3Client {
           ),
         );
 
-  /// Create from Cloudflare R2 account ID.
+  /// Create from Cloudflare R2 account ID. Targets EU jurisdiction
+  /// endpoint (`.eu.r2.cloudflarestorage.com`).
   factory S3Client.r2({
     required String accountId,
     required String accessKeyId,
@@ -49,7 +50,7 @@ class S3Client {
     String region = 'auto',
   }) {
     return S3Client(
-      host: '$accountId.r2.cloudflarestorage.com',
+      host: '$accountId.eu.r2.cloudflarestorage.com',
       accessKeyId: accessKeyId,
       secretAccessKey: secretAccessKey,
       region: region,
